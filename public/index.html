@@ -1,57 +1,293 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <link rel="icon" href="%PUBLIC_URL%/amongus_icon.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#000000" />
-    <meta
-      name="description"
-      content="Web site created using create-react-app"
-    />
-    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
-    <!--
-      Notice the use of %PUBLIC_URL% in the tags above.
-      It will be replaced with the URL of the `public` folder during the build.
-      Only files inside the `public` folder can be referenced from the HTML.
+const { WebSocket, WebSocketServer } = require('ws');
+const http = require('http');
+const uuidv4 = require('uuid').v4;
 
-      Unlike "/favicon.ico" or "favicon.ico", "%PUBLIC_URL%/favicon.ico" will
-      work correctly both with client-side routing and a non-root public URL.
-      Learn how to configure a non-root public URL by running `npm run build`.
-    -->
-    <title>Among Us</title>
-  </head>
-  <body>
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"></div>
-    <!--
-      This HTML file is a template.
-      If you open it directly in the browser, you will see an empty page.
+// Spinning the http server and the WebSocket server.
+const server = http.createServer();
+const wsServer = new WebSocketServer({ server });
+const port = 8000;
+server.listen(port, () => {
+  console.log(`WebSocket server is running on port ${port}`);
+});
 
-      You can add webfonts, meta tags, or analytics to this file.
-      The build step will place the bundled scripts into the <body> tag.
+//All game constants
+const maxPlayers = 2;
+const roles = {'imposter':1}
+roles['crewmate'] = maxPlayers-roles['imposter'];
 
-      To begin the development, run `npm start` or `yarn start`.
-      To create a production bundle, use `npm run build` or `yarn build`.
-    -->
-    <script type="module">
-  // Import the functions you need from the SDKs you need
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.5.2/firebase-app.js";
-  // TODO: Add SDKs for Firebase products that you want to use
-  // https://firebase.google.com/docs/web/setup#available-libraries
+const waitingDuration = 5;
+const gameDuration = 5*60;  //in seconds
+const preGameDuration = 5;  //in seconds
+const tasks = {
+  "flappy":{name:"Flappy Bird",description:"I WANT TO FUCK A MONKEY",completed:false},
+  "wire-maze":{name:"Wire Maze Game",description:"I WANT TO FUCK A MONKEY",completed:false},
+  "jenga":{name:"Jenga Tower",description:"I WANT TO FUCK A MONKEY",completed:false},
+  "simon":{name:"Simon",description:"I WANT TO FUCK A MONKEY",completed:false},
+  "globe":{name:"Globe Finding",description:"I WANT TO FUCK A MONKEY",completed:false},
+  "mystery-number":{name:"Mystery Number",description:"I WANT TO FUCK A MONKEY",completed:false},
+  "treasure":{name:"TREASURE HUNT",description:"I WANT TO FUCK A MONKEY",completed:false},
+  "briefcase":{name:"OPEN THE BRIEFCASE",description:"I WANT TO FUCK A MONKEY",completed:false}
+}
 
-  // Your web app's Firebase configuration
-  const firebaseConfig = {
-    apiKey: "AIzaSyD2MYJAvKXE8PlLpiCukHJABY23AJ9IwS0",
-    authDomain: "amungusdb.firebaseapp.com",
-    projectId: "amungusdb",
-    storageBucket: "amungusdb.appspot.com",
-    messagingSenderId: "246344329301",
-    appId: "1:246344329301:web:7ae8bb0ebad8823eaf0cdc"
+//All game variables
+const clients = {};
+const players = {};
+var gameStarted = false;
+const timers = {
+  waitingTimer: {},
+  preGameTimer: {},
+  gameTimer: {},
+};
+ 
+
+const typesDef = {
+  PLAYER_EVENT: 'playerEvent',
+  START_GAME_SIGNAL: "checkGameStarted",
+  MAX_PLAYER_RETRIEVAL:"checkMaxPlayers",
+  TIMER_REQUEST: "requestTime",
+  ROLE_REQUEST: "requestRole",
+  TASK_EVENT: 'taskEvent'
+}
+
+assignedColors=[]
+
+function assignColor() {
+    const availableColors = [
+        "RED", "BLUE", "GREEN", "PINK", "ORANGE",
+        "YELLOW", "BLACK", "WHITE", "PURPLE", "BROWN"
+    ];
+    // Shuffle the available colors to ensure randomness
+    for (let i = availableColors.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [availableColors[i], availableColors[j]] = [availableColors[j], availableColors[i]];
+    }
+    // If we've assigned all colors, return a message or handle accordingly
+    if (assignedColors.length >= availableColors.length) {
+        return "";
+    }
+    // Find an available color
+    let color;
+    for (let i = 0; i < availableColors.length; i++) {
+        if (!assignedColors.includes(availableColors[i])) {
+        color = availableColors[i];
+        break;
+        }
+    }
+    // If a color is found, assign it to the user
+    if(color){
+        assignedColors.push(color);
+        return color;
+    }
+    return "";
+}
+
+function unassignColor(color) {
+    const index = assignedColors.indexOf(color);
+    if (index !== -1) {
+      assignedColors.splice(index, 1);
+      return true; // Color successfully unassigned
+    }
+    return false; // Color not found in the array
+}
+
+function assignRoles() {
+  // Create an array of available roles based on the roles object
+  const availableRoles = Object.keys(roles).flatMap((role) => Array(roles[role]).fill(role));
+
+  // Shuffle the array of available roles to make the assignment random
+  for (let i = availableRoles.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [availableRoles[i], availableRoles[j]] = [availableRoles[j], availableRoles[i]];
+  }
+
+  // Assign roles to players
+  const playerIds = Object.keys(players);
+  playerIds.forEach((userId, index) => {
+    const role = availableRoles[index];
+    players[userId].role = role;
+  });
+}
+
+function startWaitingTimer() {
+  timers.waitingTimer['start time'] = Date.now();
+  timers.waitingTimer['timer'] = setTimeout(() => {
+    console.log("Waiting timer expired!");
+    // Perform actions when the timer expires
+    startPreGameTimer();
+  }, waitingDuration*1000);
+}
+
+// Start a 5-second timer
+function startPreGameTimer() {
+  timers.preGameTimer['start time'] = Date.now();
+  timers.preGameTimer['timer'] = setTimeout(() => {
+    console.log("Pre game timer expired!");
+    // Perform actions when the timer expires
+    startGameTimer();
+  }, preGameDuration*1000);
+}
+
+
+// // Stop the 5-second timer - Unrequired
+// function preGameTimer() {
+//   if (timers.preGameTimer) {
+//     clearTimeout(timers.preGameTimer);
+//     console.log("Short timer stopped.");
+//   }
+// }
+
+function getWaitingTimerValue() {
+  if (timers.waitingTimer['timer']) {
+    const elapsedTime = Date.now() - timers.waitingTimer['start time'];
+    const timeLeft = Math.max(0, Math.floor((5000 - elapsedTime) / 1000));
+    return timeLeft;
+  } else {
+    return -1; // Timer is not active
+  }
+}
+
+function getPregameTimerValue() {
+  if (timers.preGameTimer['timer']) {
+    const elapsedTime = Date.now() - timers.preGameTimer['start time'];
+    const timeLeft = Math.max(0, Math.floor((5000 - elapsedTime) / 1000));
+    return timeLeft;
+  } else {
+    return -1; // Timer is not active
+  }
+}
+
+
+// Start a 15-minute timer
+function startGameTimer() {
+  timers.gameTimer['start time'] = Date.now();
+  timers.gameTimer['timer'] = setTimeout(() => {
+    console.log("Long timer expired!");
+    // Perform actions when the timer expires
+  }, gameDuration * 1000);
+}
+
+// Stop the 15-minute timer
+function stopGameTimer() {
+  if (timers.gameTimer['timer']) {
+    clearTimeout(timers.longTimer['timer']);
+    console.log("Long timer stopped.");
+  }
+}
+
+function getGameTimerValue() {
+  if (timers.gameTimer['timer']) {
+    const elapsedTime = Date.now() - timers.gameTimer['start time'];
+    const timeLeft = Math.max(0, Math.floor((gameDuration* 1000 - elapsedTime) / 1000));;
+    return timeLeft;
+  } else {
+    return -1; // Timer is not active
+  }
+}
+
+// Example usage:
+//startShortTimer(); // Start the 5-second timer
+//startLongTimer(); // Start the 15-minute timer
+
+// To stop a timer:
+// stopShortTimer(); // Stop the 5-second timer
+// stopLongTimer(); // Stop the 15-minute timer
+
+function traceCurrentData(){
+  console.log("Clients: ",Object.keys(clients));
+  console.log("Players: ",players);
+  console.log("Assigned Colors: ",assignedColors);
+}
+
+function broadcastMessage(json) {
+  // We are sending the current data to all connected clients
+  const data = JSON.stringify(json);
+  for(let userId in clients) {
+    let client = clients[userId];
+    if(client.readyState === WebSocket.OPEN) {
+      client.send(data);
+    }
   };
+  console.log(`sent ${data} to all clients.`);
+}
 
-  // Initialize Firebase
-  const app = initializeApp(firebaseConfig);
-</script>
-  </body>
-</html>
+function unicastMessage(client, json) {
+  const data = JSON.stringify(json);
+  if (client.readyState === WebSocket.OPEN) {
+    client.send(data);
+    console.log(`Sent unicast message to client: ${data}`);
+  } else {
+    console.log(`Client is not in OPEN state; message not sent.`);
+  }
+}
+
+function handleMessage(message, userId) {
+    const dataFromClient = JSON.parse(message.toString());
+    const json = { type: dataFromClient.type };
+    if (dataFromClient.type === typesDef.PLAYER_EVENT) {
+      players[userId] = {username: dataFromClient.username, color: assignColor()};
+      json.data = {players};
+      if(Object.keys(players).length==maxPlayers){
+        gameStarted = true;
+        console.log("Started!");
+        assignRoles();
+        startWaitingTimer();
+        console.log(players);
+      }
+    }
+    else if (dataFromClient.type === typesDef.START_GAME_SIGNAL) {
+      json.data = gameStarted;
+      unicastMessage(clients[userId],json);
+      return;
+    }
+    else if (dataFromClient.type === typesDef.MAX_PLAYER_RETRIEVAL){
+      json.data = maxPlayers;
+    }
+    else if (dataFromClient.type === typesDef.TIMER_REQUEST){
+      if(dataFromClient.data=== 'waiting'){
+        json.data = getWaitingTimerValue();
+      }
+      else if(dataFromClient.data=== 'pregame'){
+        json.data = getPregameTimerValue();
+      }
+      else if(dataFromClient.data=== 'game'){
+        json.data = getGameTimerValue();
+        console.log(json.data);
+      }
+    }
+    else if(dataFromClient.type === typesDef.ROLE_REQUEST){
+      json.data = players[userId].role;
+      unicastMessage(clients[userId],json);
+      return;
+    }
+    else if(dataFromClient.type === typesDef.TASK_EVENT){
+      json.data 
+    }
+    //traceCurrentData();
+    broadcastMessage(json);
+}
+
+function handleDisconnect(userId) {
+    console.log(`${userId} disconnected.`);
+    const json = { type: typesDef.PLAYER_EVENT };
+    const username = players[userId]?.username || userId;
+    json.data = {players};
+    unassignColor(players[userId]?.color || '');
+    delete clients[userId];
+    delete players[userId];
+    traceCurrentData();
+    broadcastMessage(json);
+}
+
+// A new client connection request received
+wsServer.on('connection', function(connection) {
+  // Generate a unique code for every user
+  const userId = uuidv4();
+  console.log('Recieved a new connection');
+
+  // Store the new connection and handle messages
+  clients[userId] = connection;
+  console.log(`${userId} connected.`);
+  connection.on('message', (message) => handleMessage(message, userId));
+  // User disconnected
+  connection.on('close', () => handleDisconnect(userId));
+});
